@@ -1,0 +1,33 @@
+COLUMN_MAPPING = {
+    'account': 'patient_account_id',
+    'patient first': 'patient_first',
+    'patient last': 'patient_last',
+    'pt_fname': 'patient_first',
+    'first name': 'patient_first',
+    'pt_lname': 'patient_last',
+    'last name': 'patient_last',
+    'birth date': 'dob',
+    'dob': 'dob',
+    'sex': 'sex',
+    'zip code': 'zip_code',
+    'billed amt': 'billed_amt',
+    'charge': 'billed_amt',
+    'bill_amount': 'billed_amt',
+    'paid': 'paid',
+    'due': 'due',
+    'date of service': 'date_of_service',
+    'dos': 'date_of_service',
+}
+
+STANDARD_PATIENT_COLS = [
+    'patient_account_id',
+    'patient_first',
+    'patient_last',
+    'sex',
+    'dob',
+    'zip_code',
+    'billed_amt',
+    'paid',
+    'due',
+    'date_of_service',
+]
