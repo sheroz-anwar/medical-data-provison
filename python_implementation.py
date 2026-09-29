@@ -1,150 +1,340 @@
+import csv
+import hashlib
 import json
 import os
-import csv
+from typing import Optional
 
-COLUMN_MAPPING = {
-    'account': 'patient_account_id',
-    'patient first': 'patient_first',
-    'patient last': 'patient_last',
-    'pt_fname': 'patient_first',
-    'first name': 'patient_first',
-    'pt_lname': 'patient_last',
-    'last name': 'patient_last',
-    'birth date': 'dob',
-    'dob': 'dob',
-    'sex': 'sex',
-    'zip code': 'zip_code',
-    'billed amt': 'billed_amt',
-    'charge': 'billed_amt',
-    'bill_amount': 'billed_amt',
-    'paid': 'paid',
-    'due': 'due',
-    'date of service': 'date_of_service',
-    'dos': 'date_of_service',
+import xlrd
+import db
+
+
+INPUT_FOLDER = "input_files"
+OUTPUT_FILE = "processed_patients.csv"
+
+
+COLUMN_ALIASES = {
+    "patient_account_id": ["account", "account id", "patient account id"],
+    "patient_first": ["patient first", "first name", "fname", "pt fname", "patient fname"],
+    "patient_last": ["patient last", "last name", "lname", "pt lname", "patient lname"],
+    "sex": ["sex", "gender", "m/f", "mf"],
+    "dob": ["birth date", "date of birth", "dob"],
+    "ssn": ["ssn", "social security", "social security number", "soc sec"],
+    "patient_address_1": [
+        "address", "address 1", "address1", "patient address",
+        "patient address 1", "patient address1", "street address", "street"
+    ],
+    "patient_address_2": [
+        "address 2", "address2", "patient address 2",
+        "patient address2", "apt", "apartment", "unit", "suite"
+    ],
+    "patient_city": ["city", "patient city"],
+    "patient_state": ["state", "patient state", "st"],
+    "zip_code": ["zip", "zipcode", "zip code", "postal code"],
+    "billed_amt": ["billed amt", "charge", "bill amount", "bill_amount"],
+    "paid": ["paid", "amount paid"],
+    "due": ["due", "amount due", "balance due"],
+    "date_of_service": ["date of service", "dos", "service date"],
 }
 
-STANDARD_PATIENT_COLS = [
-    'patient_account_id',
-    'patient_first',
-    'patient_last',
-    'sex',
-    'dob',
-    'zip_code',
-    'billed_amt',
-    'paid',
-    'due',
-    'date_of_service',
-]
+
+STANDARD_COLUMNS = list(COLUMN_ALIASES.keys())
 
 
-def process_file(file_path):
-    if not os.path.exists(file_path):
-        print(f"Error: File '{file_path}' not found.")
-        return None
+def normalize_column_name(name: str) -> str:
+    name = name.strip().lower()
+    name = name.replace("_", " ")
+    name = name.replace("-", " ")
+    name = name.replace(".", " ")
 
-    with open(file_path, 'r', newline='', encoding='utf-8') as file:
-        reader = csv.DictReader(file)
-        rows = list(reader)
-
-        if rows:
-            first_row = rows[0]
-
-            if (
-                'patient first' in first_row
-                and 'guarantor last' in first_row
-            ):
-                first_val = str(first_row['patient first']).strip()
-                guar_val = str(first_row['guarantor last']).strip()
-
-                if first_val == guar_val:
-                    first_row['patient first'], first_row['patient last'] = (
-                        first_row['patient last'],
-                        first_row['patient first']
-                    )
-
-        processed_rows = []
-
-        for row in rows:
-            cleaned_row = {}
-
-            for column in row:
-                clean_column = column.strip().lower()
-                standard_column = COLUMN_MAPPING.get(
-                    clean_column,
-                    clean_column
-                )
-                cleaned_row[standard_column] = row[column]
-
-            known_cols = []
-
-            for column in cleaned_row:
-                if column in STANDARD_PATIENT_COLS:
-                    known_cols.append(column)
-
-            unknown_cols = []
-
-            for column in cleaned_row:
-                if column not in STANDARD_PATIENT_COLS:
-                    unknown_cols.append(column)
-
-            if unknown_cols:
-                extra_attributes = {}
-
-                for column in unknown_cols:
-                    extra_attributes[column] = cleaned_row[column]
-
-                extra_attributes_json = json.dumps(extra_attributes)
-            else:
-                extra_attributes_json = '{}'
-
-            final_row = {}
-
-            for column in known_cols:
-                final_row[column] = cleaned_row[column]
-
-            final_row['extra_attributes'] = extra_attributes_json
-            processed_rows.append(final_row)
-
-        return processed_rows
+    return " ".join(name.split())
 
 
-input_folder = 'input_files'
-output_file = 'processed_patients.csv'
+def build_column_mapping() -> dict[str, str]:
+    mapping = {}
 
-if os.path.exists(input_folder):
-    files = [
-        f for f in os.listdir(input_folder)
-        if f.endswith('.csv')
-    ]
+    for standard_column, aliases in COLUMN_ALIASES.items():
+        mapping[normalize_column_name(standard_column)] = standard_column
 
-    if not files:
-        print(f"No CSV files found in '{input_folder}'.")
-    else:
-        all_processed_rows = []
+        for alias in aliases:
+            mapping[normalize_column_name(alias)] = standard_column
 
-        for file_name in files:
-            full_path = os.path.join(input_folder, file_name)
-            processed_rows = process_file(full_path)
+    return mapping
 
-            if processed_rows is not None:
-                all_processed_rows.extend(processed_rows)
 
-        with open(
-            output_file,
-            'w',
-            newline='',
-            encoding='utf-8'
-        ) as file:
-            fieldnames = STANDARD_PATIENT_COLS + ['extra_attributes']
+COLUMN_MAPPING = build_column_mapping()
 
-            writer = csv.DictWriter(
-                file,
-                fieldnames=fieldnames
+
+def make_unique_headers(headers: list[str]) -> list[str]:
+    counts = {}
+    unique_headers = []
+
+    for header in headers:
+        count = counts.get(header, 0) + 1
+        counts[header] = count
+
+        if count == 1:
+            unique_headers.append(header)
+        else:
+            unique_headers.append(
+                f"{header}__duplicate_{count}"
             )
 
-            writer.writeheader()
-            writer.writerows(all_processed_rows)
+    return unique_headers
 
-        print('All files processed successfully.')
-else:
-    print(f"Directory '{input_folder}' does not exist.")
+
+def calculate_file_hash(file_path: str) -> str:
+    sha256 = hashlib.sha256()
+
+    with open(file_path, "rb") as file:
+        while chunk := file.read(1024 * 1024):
+            sha256.update(chunk)
+
+    return sha256.hexdigest()
+
+
+def read_csv_file(
+    file_path: str,
+) -> tuple[list[str], list[dict[str, str]]]:
+
+    with open(
+        file_path,
+        "r",
+        newline="",
+        encoding="utf-8-sig",
+    ) as file:
+        rows = list(csv.reader(file))
+
+    if not rows:
+        return [], []
+
+    headers = make_unique_headers(rows[0])
+    data = []
+
+    for values in rows[1:]:
+        row = {
+            header: values[index] if index < len(values) else ""
+            for index, header in enumerate(headers)
+        }
+        data.append(row)
+
+    return headers, data
+
+
+def find_xls_header_row(sheet) -> Optional[int]:
+    for row_index in range(sheet.nrows):
+        matches = 0
+
+        for column_index in range(sheet.ncols):
+            value = sheet.cell_value(
+                row_index,
+                column_index,
+            )
+
+            if isinstance(value, str):
+                normalized = normalize_column_name(value)
+
+                if normalized in COLUMN_MAPPING:
+                    matches += 1
+
+        if matches >= 2:
+            return row_index
+
+    return None
+
+
+def read_xls_file(
+    file_path: str,
+) -> tuple[list[str], list[dict[str, str]]]:
+
+    workbook = xlrd.open_workbook(file_path)
+    sheet = workbook.sheet_by_index(0)
+
+    header_row = find_xls_header_row(sheet)
+
+    if header_row is None:
+        print(f"No header row found in '{file_path}'.")
+        return [], []
+
+    raw_headers = [
+        str(
+            sheet.cell_value(header_row, column)
+        ).strip()
+        for column in range(sheet.ncols)
+    ]
+
+    headers = make_unique_headers(raw_headers)
+    data = []
+
+    for row_index in range(header_row + 1, sheet.nrows):
+        row = {
+            header: str(
+                sheet.cell_value(row_index, column_index)
+            )
+            for column_index, header in enumerate(headers)
+        }
+        data.append(row)
+
+    return headers, data
+
+
+def read_file(
+    file_path: str,
+) -> tuple[list[str], list[dict[str, str]]]:
+
+    extension = os.path.splitext(file_path)[1].lower()
+
+    if extension == ".csv":
+        return read_csv_file(file_path)
+
+    if extension == ".xls":
+        return read_xls_file(file_path)
+
+    return [], []
+
+
+def process_rows(
+    rows: list[dict[str, str]],
+) -> list[dict[str, str]]:
+
+    processed_rows = []
+
+    for row in rows:
+        cleaned_row = {}
+        extra_attributes = {}
+
+        for raw_column, value in row.items():
+
+            if "__duplicate_" in raw_column:
+                extra_attributes[raw_column] = value
+                continue
+
+            standard_column = COLUMN_MAPPING.get(
+                normalize_column_name(raw_column)
+            )
+
+            if standard_column:
+                cleaned_row[standard_column] = value
+            else:
+                extra_attributes[raw_column] = value
+
+        for column in STANDARD_COLUMNS:
+            cleaned_row.setdefault(column, "")
+
+        cleaned_row["extra_attributes"] = json.dumps(
+            extra_attributes
+        )
+
+        processed_rows.append(cleaned_row)
+
+    return processed_rows
+
+
+def process_file(
+    file_path: str,
+) -> Optional[list[dict[str, str]]]:
+
+    if not os.path.exists(file_path):
+        print(f"File not found: {file_path}")
+        return None
+
+    headers, rows = read_file(file_path)
+
+    if not headers or not rows:
+        return []
+
+    return process_rows(rows)
+
+
+def process_all_files(
+    input_folder: str,
+) -> list[dict[str, str]]:
+
+    if not os.path.exists(input_folder):
+        print(f"Directory does not exist: {input_folder}")
+        return []
+
+    files = [
+        file_name
+        for file_name in os.listdir(input_folder)
+        if file_name.lower().endswith((".csv", ".xls"))
+    ]
+
+    all_rows = []
+
+    for file_name in files:
+        file_path = os.path.join(input_folder, file_name)
+        file_hash = calculate_file_hash(file_path)
+
+        if db.is_file_processed(file_hash):
+            print(f"Skipping already processed: {file_name}")
+            continue
+
+        print(f"Processing: {file_name}")
+
+        rows = process_file(file_path)
+
+        if not rows:
+            print(f"No data found: {file_name}")
+            continue
+
+        all_rows.extend(rows)
+
+        db.mark_file_processed(
+            file_name,
+            file_hash,
+        )
+
+    return all_rows
+
+
+def write_processed_data(
+    output_file: str,
+    rows: list[dict[str, str]],
+) -> None:
+
+    fieldnames = STANDARD_COLUMNS + ["extra_attributes"]
+
+    with open(
+        output_file,
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as file:
+
+        writer = csv.DictWriter(
+            file,
+            fieldnames=fieldnames,
+        )
+
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def main() -> None:
+    conn = db.create_database()
+
+    try:
+        rows = process_all_files(INPUT_FOLDER)
+
+        if not rows:
+            print("No new files to process.")
+            return
+
+        write_processed_data(
+            OUTPUT_FILE,
+            rows,
+        )
+
+        db.insert_data(
+            rows,
+            conn,
+        )
+
+        print("All new files processed successfully.")
+
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    main()
